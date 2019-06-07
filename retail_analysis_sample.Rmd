@@ -1,0 +1,510 @@
+---
+title: "retail_report"
+author: "kk"
+date: '`r Sys.Date()`'
+output:
+  html_notebook: 
+    toc: yes
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.align = 'center', warning = F)
+
+here::here()
+library(tidyverse)
+library(shiny)
+library(rlang)
+library(data.table)
+library(corrr)
+library(corrplot)
+library(prophet)
+library(tsibble)
+library(ggbiplot)
+library(FactoMineR)
+library(factoextra)
+library(janitor)
+library(explore)
+library(DT)
+
+set.seed(126)
+
+ggplot2::theme_set(theme_light() + 
+                     theme(legend.position = "none") + 
+                     theme(axis.title.x=element_text(colour="darkblue", size=10)) +
+                     theme(axis.title.y=element_text(colour="darkblue", size=10)) +
+                     theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5))
+)
+
+options(DT.options = list(
+  pageLength = 12, 
+  scroller = TRUE, 
+  scrollY = TRUE,
+  scrollX = TRUE,
+  language = list(search = 'Search:'),
+  search = list(regex = TRUE, caseInsensitive = FALSE))
+)
+
+DT_func <- function(.x, ...){
+  datatable(.x, class = 'cell-border stripe', rownames = F, filter = "top" ) %>% 
+    formatStyle(columns = c(1:ncol(.$x$data)), fontSize = '10px')
+}
+
+df_numerification <- function(.df, q){
+  df <- .df
+  df <- df %>% mutate_if(is.character, ~as.numeric(eval(!!q)) )
+  return(df)
+}
+```
+
+## Pradiniai duomenys
+
+Duomenų valymas, paruošimas tolimesniems skaičiavimams/analizei, ir dėmenų analizė. Duomenų pagrindiniai parametrai po duplikuotų įrašų, įrašų su 0iniais kiekiais ir sumomis, pakeitus kintamųjų pavadinimus tolimesniam procesingui:
+
+```{r data.01}
+
+duomenys <- readRDS("data/duomenys.rds")
+duomenys_ <- janitor::clean_names(dat = duomenys, case = "snake") %>% 
+  dplyr::select(-c("number_of_records", "id", "receipt_id")) %>% 
+  dplyr::mutate(account_id = replace_na(account_id, -1),
+                suma = as.numeric(str_replace(suma, "\\," , "\\.")),
+                receipt_date = lubridate::ymd(receipt_date)) %>% 
+  dplyr::filter(kiekis > 0, suma > 0)
+
+duomenys_ %>% skimr::skim() %>% print()
+
+# duomenys %>% janitor::clean_names(dat = ., case = "snake") %>% 
+#   dplyr::count(receipt_date, receipt_id, store, name = "duplicates", sort = T)
+# duomenys_eda <- duomenys_ %>% 
+#   mutate_if(is.character, ~as.numeric(str_extract(., "\\d+$"))) %>% 
+#   select_if(is.numeric)
+
+duomenys_eda <- df_numerification(duomenys_, expr(str_extract(., "\\d+$")) ) %>% 
+  dplyr::mutate(receipt_month = as.integer(lubridate::month(receipt_date))) %>% select(-receipt_date)
+#duomenys_eda %>% glimpse()
+
+```
+
+Patikrinam ar ProduktoId yra unikalus Brande; kiek iš viso Brando-Produkto samplų:
+
+**!!Paieškoje veikia ir regexp sintaksė!!**
+
+```{r data.02}
+duomenys_ %>% 
+  dplyr::count(brand, product, sort = T, name = "n_brand-product") %>% 
+  add_count(product, sort = T, name = "n_unique") %>% 
+  DT_func()
+```
+
+
+Top 100 unikalių čekių sumos ir kiekiai:
+
+```{r data.03}
+janitor::clean_names(dat = duomenys, case = "snake") %>% 
+  dplyr::mutate(account_id = replace_na(account_id, -1),
+                suma = as.numeric(str_replace(suma, "\\," , "\\.")),
+                receipt_date = lubridate::ymd(receipt_date)) %>% 
+  dplyr::group_by(receipt_id, receipt_date, store, account_id) %>% 
+  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+  dplyr::arrange(desc(suma)) %>% 
+  head(100) %>% 
+  DT_func()
+```
+
+## EDA
+
+Detalioji duomenų analizės grafikai - skirstiniai, QQ grafikai, koreliacijos, PCA [Principle Component Analysis] detalioms kintamųjų priklausomybėms nustatyti:
+
+```{r EDA.00}
+#DataExplorer::create_report(duomenys_eda)
+DataExplorer::plot_histogram(duomenys_eda)
+DataExplorer::plot_qq(duomenys_eda, sampled_rows = 3000L )
+DataExplorer::plot_qq(duomenys_eda, by = "product", sampled_rows = 3000L )
+DataExplorer::plot_correlation(duomenys_eda, maxcat = 5L)
+DataExplorer::plot_prcomp(duomenys_eda, variance_cap = 0.9, nrow = 2L, ncol = 2L)
+
+df <- duomenys_eda %>%
+  dplyr::group_by(brand, product) %>% 
+  dplyr::summarise(total_suma = sum(suma),
+                   total_kiekis = sum(kiekis)) %>% 
+  dplyr::arrange(desc(total_suma), desc(total_kiekis)) 
+
+df.class <- map_chr(df$brand, function(x) { 
+  ifelse(x %/% 10 == 0, str_c("brand0", x), str_c("brand", x)) } )
+pca_duomenys_ <- prcomp(df, scale. = T)
+ggbiplot(pca_duomenys_, obs.scale = 1, var.scale = 1,
+         groups = df.class, ellipse = T, circle = T) +
+  scale_colour_viridis_d() +
+  #scale_color_discrete(name = '') +
+  theme(legend.direction = 'horizontal', legend.position = 'top')
+
+```
+Matyti, kad grupės Suma-Kiekis, Brand-Produktas tarpusavyje koreliuoja. Ši informacija bus naudinga atliekant klasteriavimą toliau.
+
+### Brand-Product analizės
+
+1. apyvarta pagal **brandą-produktą** visam laikotarpiui:
+*suminiai skaičiai pateikti mažėjančia tvarka.*
+```{r EDA.01}
+duomenys_ %>% 
+  dplyr::group_by(brand, product) %>% 
+  dplyr::summarise(total_suma = sum(suma),
+                   total_kiekis = sum(kiekis)) %>% 
+  dplyr::arrange(desc(total_suma), desc(total_kiekis)) -> duomenys_grp_product
+
+DT_func(duomenys_grp_product)
+
+low_brands <- tail(duomenys_grp_product, 10) %>% pull(brand) %>% unique() %>% sort()
+low_products <- tail(duomenys_grp_product) %>% pull(product) %>% unique() %>% sort()
+```
+Iš čia matyti, kad Brandai: `r cat(low_brands)` ir jų Produktai: `r cat(low_products)`  yra mažiausiai apyvartūs. 
+
+2. apyvarta pagal **parduotuvę-brandą_produktą**:
+```{r EDA.02}
+duomenys_ %>% 
+  dplyr::group_by(store, brand, product) %>% 
+  dplyr::summarise(total_suma = sum(suma),
+                   total_kiekis = sum(kiekis)) %>% 
+  dplyr::arrange(desc(total_suma), desc(total_kiekis)) -> duomenys_grp_store 
+
+df <- data.table::dcast(setDT(duomenys_grp_store),  store ~ brand+product, value.var = "total_suma")  %>% 
+  dplyr::arrange_if(is.numeric, desc)
+
+DT_func(df)
+
+```
+Iš čia matyti, kiekvienos parduotuvės Brand-Product apyvarta visam laikotarpiui. Interaktyviai galima nustatyti mažiausios apyvartos parduotuves kiekvienam produktui.
+
+Analizė pagal parduotuves, pasirinkus mažiausiai apyvarčius `r length(low_products)` Produktus:
+```{r EDA.02a}
+df %>% 
+  dplyr::select(store, matches(str_c(low_products, collapse = "|"))) %>% 
+  dplyr::mutate(sumrow = rowSums(.[,-1],na.rm = T)) %>% 
+  dplyr::arrange(desc(sumrow)) -> df
+
+DT_func(df)
+
+```
+
+3. informacija apie **brandą-produktą-unikalių_vartotojų_skaičių**:
+```{r EDA.03, echo=T}
+duomenys_ %>% 
+  dplyr::select(account_id, brand, product) %>% 
+  dplyr::distinct() %>% 
+  dplyr::group_by(brand, product) %>% 
+  dplyr::summarise(n_uniq_account = n()) %>% 
+  arrange(desc(n_uniq_account)) -> duomenys_grp_account
+
+DT_func(duomenys_grp_account)
+
+duomenys_ %>% 
+  dplyr::group_by(brand, product, account_id) %>% 
+  dplyr::summarise(n_purchases = n(),
+                   total_suma = sum(suma),
+                   total_kiekis = sum(kiekis)) %>% 
+  arrange(desc(n_purchases)) -> df
+
+```
+Brand-Product-Unikalus_vart_skaičius:
+
+```{r EDA.03a}
+duomenys_grp_product_account <- duomenys_grp_product %>% 
+  left_join(duomenys_grp_account, by = c("brand", "product"))
+
+DT_func(duomenys_grp_product_account)
+
+```
+
+
+## Klasteriavimas
+
+toliau pateikiu duomenų klasteriavimą. Nustatyti klasterių kiekiui, mes jau matėme iš PCA analizės, kad 4 klasterių pakanka. Naudoju agreguotus duomenis `duomenys_grp_store` [duomenys grupuoti pagal brandą-produktą-parduotuvę]. Toliau pateiksiu "Elbow" grafiką, kuris aiškiai parodo kiek klasterių naudinga tyrinėti. 
+
+```{r clustering}
+#----Elbow-------
+df <- df_numerification(.df= duomenys_grp_store, q = expr(str_extract(., "\\d+$")) )
+# function to compute total within-cluster sum of square
+# wss <- function(.df, k) {
+#   kmeans(.df, k, nstart = 10 )$tot.withinss
+# }
+# # Compute and plot wss for k = 1 to k = 15
+# k.values <- 1:9
+# # extract wss for 2-15 clusters
+# wss_values <- map_dbl(k.values, ~wss(.df = .df, k = .))
+# plot(k.values, wss_values,
+#      type="b", pch = 19, frame = FALSE,
+#      xlab="Number of clusters K",
+#      ylab="Total within-clusters SmOSq)
+fviz_nbclust(df, kmeans, method = "wss")
+#---K-MEANS ---------
+duomenys__cl <- kmeans(df, centers = 4, nstart = 25)
+fviz_cluster(object = duomenys__cl, data = df)
+
+df <- df %>% mutate(cluster = duomenys__cl$cluster)
+```
+
+Klasterių vidurkiai: 
+
+```{r clusters means}
+duomenys__cl$centers
+```
+
+Duomenų klasteriavimo lentelė:
+
+```{r clusters table}
+DT_func(df)
+```
+Kaip matyti klasteris 4 yra mažiausios apyvartos deriniai; klasteris 1 - didžiausia apyvarta.
+
+Dinaminė aplikacija klasteriams apskaičiuoti ir pavaizduoti.
+
+```{r clustering_app, echo = FALSE}
+
+app_kmeans_cluster <-  function(dataset) {
+  
+  vars = names(dataset)
+  
+  shinyApp(
+    ui <- fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+               column(4, selectInput('xcol', 'X: ', vars, selected = vars[1])),
+               column(4, selectInput('ycol', 'Y: ', vars, selected = vars[2])),
+               column(4, numericInput('clusters', 'Cluster count', 3, min = 1, max = 9))
+      ),
+      fluidRow(
+        plotOutput('kmeans', height = "400px")  
+      )
+    ),
+    
+    server <- function(input, output, session) {
+      selectedData = reactive({
+        dataset[, c(input$xcol, input$ycol)]
+      })
+      clusters  <- reactive({
+        kmeans(selectedData(), input$clusters)
+      })
+      output$kmeans  <- renderPlot(
+        height = 400,
+        {
+          res = clusters()
+          par(mar = c(5.1, 4.1, 0, 1))
+          plot(selectedData(),
+               col = res$cluster, pch = 20, cex = 3)
+          points(res$centers, pch = 4, cex = 4, lwd = 4)
+        })
+    },
+    
+    options = list(height = 500)
+  )
+}
+
+app_kmeans_cluster(df)
+```
+
+
+## Grafikai
+
+**Suminiai produktų** grafikai kiekvienam mėnesiui. Spalva nurodo brandą. 
+
+```{r vis product sum}
+df <- duomenys_eda %>% 
+  dplyr::group_by(brand, product, receipt_month) %>% 
+  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+  tidyr::gather(key = measure, value = value, suma:kiekis) %>% 
+  dplyr::arrange(desc(value))
+
+g <- ggplot(df, aes(x = factor(product), y = value, fill = brand)) + 
+  geom_col() + 
+  scale_fill_viridis_c() + 
+  theme(legend.position="top") + 
+  facet_grid(measure ~ receipt_month, scales = "free_y")
+
+g
+```
+
+**Statistiniai produktų** pasiskirstymai kiekvienam mėnesiui. Spalva == Brandas.
+
+```{r vis product stats}
+df <- duomenys_eda %>% 
+  #dplyr::filter(product %in% 1:10) %>% 
+  tidyr::gather(key = measure, value = value, c(suma,kiekis))
+
+g <- ggplot(df, aes(x = factor(product), y = value, colour = brand)) + 
+  geom_violin() + 
+  geom_boxplot(width=.1, outlier.colour=NA) +
+  stat_summary(fun.y="mean", geom="point", shape=23, size=3, fill="red") +
+  scale_fill_viridis_c() + 
+  theme(legend.position="top") + 
+  facet_grid(measure ~ receipt_month, scales = "free_y")
+
+g
+```
+
+**Suminiai parduotuvių** pardavimai kiekvienam mėnesiui.
+```{r vis store sum}
+df <- duomenys_eda %>% 
+  dplyr::group_by(store, receipt_month) %>% 
+  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+  tidyr::gather(key = measure, value = value, c(suma, kiekis)) %>% 
+  dplyr::arrange(desc(value))
+
+g <- ggplot(df, aes(x = factor(store), y = value)) + 
+  geom_col(aes(fill = store)) +
+  scale_fill_viridis_c() + 
+  theme(legend.position="top") + 
+  facet_grid(measure ~ receipt_month, scales = "free_y")
+
+g
+```
+
+
+Brandų ir Produktų kitimo laike grafikai:
+
+```{r vis product vs time}
+df <- duomenys_ %>% 
+  dplyr::group_by(brand, product, receipt_date) %>% 
+  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+  tidyr::gather(key = measure, value = value, c(suma, kiekis)) %>% 
+  dplyr::arrange(desc(value))
+
+g <- ggplot(df, aes(x = receipt_date, y = value, color = product) ) + 
+  geom_line() + 
+  scale_fill_viridis_c() + 
+  #theme(legend.position="top") + 
+  facet_grid(brand ~ measure, scales = "free_y")
+
+g
+```
+
+## Aplikacijos
+
+Aplikacija stebėti suminių kiekio ir piniginės sumos pokyčius kiekvienam mėnesiui:
+
+```{r app remove prod}
+
+app_remove_prod <-  function(dataset) {
+  
+  vars <- dataset$product %>% unique() %>% sort()
+  
+  shinyApp(
+    ui <- fluidPage(
+      
+      titlePanel("Aplication for sums and counts analysis"),
+      
+      fluidRow(style = "padding-bottom: 20px;",
+               column(4, selectInput('product', 'Product to be removed: ', vars, selected = vars[1]))
+      ),
+      fluidRow(
+        column(4, 'total stats over period: '),
+        tableOutput('tabBefore')  
+      ),
+      fluidRow(
+         column(4, 'total stats after selected product removal over period: '),
+        tableOutput('tabAfter')  
+      ),
+      fluidRow(
+        column(4, 'differences after selected product removal: '),
+        tableOutput('tabDiff')  
+      )
+    ),
+    
+    server <- function(input, output) {
+      dtBefore <-  dataset %>% 
+        dplyr::group_by(receipt_month) %>%
+        dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+        dplyr::left_join(dataset %>% 
+                           dplyr::select(account_id, brand, product, receipt_month) %>% 
+                           dplyr::distinct() %>% 
+                           dplyr::group_by(receipt_month) %>% 
+                           dplyr::summarise(n_uniq_account = n()) %>% 
+                           arrange(desc(n_uniq_account)),
+                         by ="receipt_month")
+      dtAfter <- reactive({ 
+         dataset %>% 
+          dplyr::filter(product != input$product) %>% 
+        dplyr::group_by(receipt_month) %>%
+        dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+        dplyr::left_join(dataset %>% 
+                           dplyr::filter(product != input$product) %>% 
+                           dplyr::select(account_id, brand, product, receipt_month) %>% 
+                           dplyr::distinct() %>% 
+                           dplyr::group_by(receipt_month) %>% 
+                           dplyr::summarise(n_uniq_account = n()) %>% 
+                           arrange(desc(n_uniq_account)),
+                         by ="receipt_month")
+      })
+      
+      output$tabBefore  <- renderTable({
+          dtBefore
+        })
+      
+      output$tabAfter  <- renderTable({
+          dtAfter()
+        })
+      
+      output$tabDiff  <- renderTable({
+          dtAfter() - dtBefore
+        })
+    },
+    options = list(height = 980)
+  )
+}
+
+app_remove_prod(duomenys_eda)
+
+```
+
+Aplikacijos prototipas prognozuoti bendros € sumos pokyčius į ateitį kiekvienam Produktui, remiantis duotais *raw* duomenimis:
+
+```{r app ts predict}
+library(prophet)
+
+app_ts_predict <-  function(dataset) {
+  
+  vars <- dataset$product %>% unique() %>% sort()
+  
+  shinyApp(
+    ui <- fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+               column(4, selectInput('product', 'Product to be predicted: ', vars, selected = vars[1])),
+               column(4, numericInput('predDays', 'Days to be predicted: ', 7, min = 1, max = 365))
+      ),
+      fluidRow(
+        column(4, "Prediction plot"),
+        plotOutput('predPlot', height = "400px")  
+      )
+    ),
+    
+    server <- function(input, output) {
+      
+      
+      output$predPlot  <- renderPlot({
+        m <- dataset %>% 
+          dplyr::filter(product == input$product) %>% 
+          dplyr::group_by(product, receipt_date) %>% 
+          dplyr::summarise(kiekis = sum(kiekis)) %>% 
+          dplyr::ungroup() %>% 
+          dplyr::select(-product) %>% 
+          setNames(c("ds", "y")) %>% 
+          prophet(., growth = "linear", weekly.seasonality = T, daily.seasonality=T)
+        
+        future <-prophet::make_future_dataframe(m, periods = as.numeric(input$predDays))
+        
+        forecast <- predict(m, future) 
+        plot(m, forecast, main = "product prediction in linear method")
+      })
+    },
+    
+    options = list(height = 980)
+  )
+}
+
+app_ts_predict(duomenys_)
+
+```
+
