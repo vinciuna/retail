@@ -8,8 +8,8 @@ output:
   html_document:
     toc: true
     toc_float:
-      collapsed: true
-      smooth_scroll: true
+      collapsed: false
+      smooth_scroll: false
 runtime: shiny
 ---
 
@@ -78,10 +78,15 @@ duomenys_ <- janitor::clean_names(dat = duomenys, case = "snake") %>%
 
 duomenys_ %>% skimr::skim() %>% print()
 
-rm(duomenys)
+# duomenys %>% janitor::clean_names(dat = ., case = "snake") %>% 
+#   dplyr::count(receipt_date, receipt_id, store, name = "duplicates", sort = T)
+# duomenys_eda <- duomenys_ %>% 
+#   mutate_if(is.character, ~as.numeric(str_extract(., "\\d+$"))) %>% 
+#   select_if(is.numeric)
 
 duomenys_eda <- df_numerification(duomenys_, expr(str_extract(., "\\d+$")) ) %>% 
   dplyr::mutate(receipt_month = as.integer(lubridate::month(receipt_date))) %>% select(-receipt_date)
+#duomenys_eda %>% glimpse()
 
 ```
 
@@ -92,37 +97,52 @@ Patikrinam ar ProduktoId yra unikalus Brande; kiek iš viso Brando-Produkto samp
 ```{r data.02}
 duomenys_ %>% 
   dplyr::count(brand, product, sort = T, name = "n_brand-product") %>% 
-  dplyr::add_count(product, sort = T, name = "n_unique") %>% 
+  add_count(product, sort = T, name = "n_unique") %>% 
   DT_func()
 ```
 
+
+Top 100 unikalių čekių sumos ir kiekiai:
+
+```{r data.03}
+janitor::clean_names(dat = duomenys, case = "snake") %>% 
+  dplyr::mutate(account_id = replace_na(account_id, -1),
+                suma = as.numeric(str_replace(suma, "\\," , "\\.")),
+                receipt_date = lubridate::ymd(receipt_date)) %>% 
+  dplyr::group_by(receipt_id, receipt_date, store, account_id) %>% 
+  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+  dplyr::arrange(desc(suma)) %>% 
+  head(100) %>% 
+  DT_func()
+```
 
 ## EDA
 
 Detalioji duomenų analizės grafikai - skirstiniai, QQ grafikai, koreliacijos, PCA [Principle Component Analysis] detalioms kintamųjų priklausomybėms nustatyti:
 
 ```{r EDA.00}
+#DataExplorer::create_report(duomenys_eda)
 DataExplorer::plot_histogram(duomenys_eda)
 DataExplorer::plot_qq(duomenys_eda, sampled_rows = 3000L )
 DataExplorer::plot_qq(duomenys_eda, by = "product", sampled_rows = 3000L )
 DataExplorer::plot_correlation(duomenys_eda, maxcat = 5L)
 DataExplorer::plot_prcomp(duomenys_eda, variance_cap = 0.9, nrow = 2L, ncol = 2L)
 
-# df <- duomenys_eda %>%
-#   dplyr::group_by(brand, product) %>% 
-#   dplyr::summarise(total_suma = sum(suma),
-#                    total_kiekis = sum(kiekis)) %>% 
-#   dplyr::arrange(desc(total_suma), desc(total_kiekis)) 
-# 
-# df.class <- map_chr(df$brand, function(x) { 
-#   ifelse(x %/% 10 == 0, str_c("brand0", x), str_c("brand", x)) } )
-# pca_duomenys_ <- prcomp(df, scale. = T)
-# ggbiplot(pca_duomenys_, obs.scale = 1, var.scale = 1,
-#          groups = df.class, ellipse = T, circle = T) +
-#   ggplot2::scale_colour_viridis_d() +
-#   #scale_color_discrete(name = '') +
-#   ggplot2::theme(legend.direction = 'horizontal', legend.position = 'top')
-# rm(df.class)
+df <- duomenys_eda %>%
+  dplyr::group_by(brand, product) %>% 
+  dplyr::summarise(total_suma = sum(suma),
+                   total_kiekis = sum(kiekis)) %>% 
+  dplyr::arrange(desc(total_suma), desc(total_kiekis)) 
+
+df.class <- map_chr(df$brand, function(x) { 
+  ifelse(x %/% 10 == 0, str_c("brand0", x), str_c("brand", x)) } )
+pca_duomenys_ <- prcomp(df, scale. = T)
+ggbiplot(pca_duomenys_, obs.scale = 1, var.scale = 1,
+         groups = df.class, ellipse = T, circle = T) +
+  scale_colour_viridis_d() +
+  #scale_color_discrete(name = '') +
+  theme(legend.direction = 'horizontal', legend.position = 'top')
+
 ```
 Matyti, kad grupės Suma-Kiekis, Brand-Produktas tarpusavyje koreliuoja. Ši informacija bus naudinga atliekant klasteriavimą toliau.
 
@@ -139,8 +159,8 @@ duomenys_ %>%
 
 DT_func(duomenys_grp_product)
 
-low_brands <- tail(duomenys_grp_product, 12) %>% pull(brand) %>% unique() %>% sort()
-low_products <- tail(duomenys_grp_product, 12) %>% pull(product) %>% unique() %>% sort()
+low_brands <- tail(duomenys_grp_product, 10) %>% pull(brand) %>% unique() %>% sort()
+low_products <- tail(duomenys_grp_product) %>% pull(product) %>% unique() %>% sort()
 ```
 Iš čia matyti, kad Brandai: `r cat(low_brands)` ir jų Produktai: `r cat(low_products)`  yra mažiausiai apyvartūs. 
 
@@ -225,7 +245,7 @@ fviz_nbclust(df, kmeans, method = "wss")
 duomenys__cl <- kmeans(df, centers = 4, nstart = 25)
 fviz_cluster(object = duomenys__cl, data = df)
 
-df <- df %>% dplyr::mutate(cluster = duomenys__cl$cluster)
+df <- df %>% mutate(cluster = duomenys__cl$cluster)
 ```
 
 Klasterių vidurkiai: 
@@ -246,7 +266,9 @@ Dinaminė aplikacija klasteriams apskaičiuoti ir pavaizduoti.
 ```{r clustering_app, echo = FALSE}
 
 app_kmeans_cluster <-  function(dataset) {
+  
   vars = names(dataset)
+  
   shinyApp(
     ui <- fluidPage(
       fluidRow(style = "padding-bottom: 20px;",
@@ -280,6 +302,7 @@ app_kmeans_cluster <-  function(dataset) {
     options = list(height = 500)
   )
 }
+
 app_kmeans_cluster(df)
 ```
 
@@ -365,7 +388,9 @@ Aplikacija stebėti suminių kiekio ir piniginės sumos pokyčius kiekvienam mė
 ```{r app remove prod}
 
 app_remove_prod <-  function(dataset) {
+  
   vars <- dataset$product %>% unique() %>% sort()
+  
   shinyApp(
     ui <- fluidPage(
       
@@ -426,7 +451,7 @@ app_remove_prod <-  function(dataset) {
           dtAfter() - dtBefore
         })
     },
-    options = list(height = 500)
+    options = list(height = 980)
   )
 }
 
@@ -475,7 +500,7 @@ app_ts_predict <-  function(dataset) {
       })
     },
     
-    options = list(height = 500)
+    options = list(height = 980)
   )
 }
 
