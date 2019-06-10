@@ -26,7 +26,9 @@ library(corrr)
 library(corrplot)
 library(prophet)
 library(forecast)
+library(feasts)
 library(tsibble)
+library(fable)
 library(ggbiplot)
 library(FactoMineR)
 library(factoextra)
@@ -93,8 +95,8 @@ Patikrinam ar ProduktoId yra unikalus Brande; kiek iš viso Brando-Produkto samp
 
 ```{r data.02}
 duomenys_ %>% 
-  dplyr::count(brand, product, sort = T, name = "n_brand-product") %>% 
-  dplyr::add_count(product, sort = T, name = "n_unique") %>% 
+  dplyr::count(brand, product, sort = T, name = "n_brand-product_sampl") %>% 
+  dplyr::add_count(product, sort = T, name = "n_prod_unique") %>% 
   DT_func()
 
 ```
@@ -105,14 +107,8 @@ duomenys_ %>%
 Detalioji duomenų analizės grafikai - skirstiniai, QQ grafikai, koreliacijos, PCA [Principle Component Analysis] detalioms kintamųjų priklausomybėms nustatyti:
 
 ```{r EDA.00}
-#DataExplorer::plot_histogram(duomenys_eda)
-#DataExplorer::plot_qq(duomenys_eda, sampled_rows = 1000L )
-#DataExplorer::plot_qq(duomenys_eda, by = "product", sampled_rows = 1000L )
-#DataExplorer::plot_correlation(duomenys_eda, maxcat = 5L)
-#DataExplorer::plot_prcomp(duomenys_eda, variance_cap = 0.9, nrow = 2L, ncol = 2L)
-
 df <- duomenys_eda %>%
-  dplyr::group_by(brand, product) %>%
+  dplyr::group_by(brand, product, receipt_month) %>%
   dplyr::summarise(total_suma = sum(suma),
                    total_kiekis = sum(kiekis)) %>%
   dplyr::arrange(desc(total_suma), desc(total_kiekis))
@@ -187,12 +183,12 @@ duomenys_ %>%
 
 DT_func(duomenys_grp_account)
 
-duomenys_ %>% 
-  dplyr::group_by(brand, product, account_id) %>% 
-  dplyr::summarise(n_purchases = n(),
-                   total_suma = sum(suma),
-                   total_kiekis = sum(kiekis)) %>% 
-  dplyr::arrange(desc(n_purchases)) -> df
+# duomenys_ %>% 
+#   dplyr::group_by(brand, product, account_id) %>% 
+#   dplyr::summarise(n_purchases = n(),
+#                    total_suma = sum(suma),
+#                    total_kiekis = sum(kiekis)) %>% 
+#   dplyr::arrange(desc(n_purchases)) -> df
 
 ```
 Brand-Product-Unikalus_vart_skaičius:
@@ -208,48 +204,15 @@ DT_func(duomenys_grp_product_account)
 
 ## Klasteriavimas
 
-toliau pateikiu duomenų klasteriavimą. Nustatyti klasterių kiekiui, mes jau matėme iš PCA analizės, kad 4 klasterių pakanka. Naudoju agreguotus duomenis `duomenys_grp_store` [duomenys grupuoti pagal brandą-produktą-parduotuvę]. Toliau pateiksiu "Elbow" grafiką, kuris aiškiai parodo kiek klasterių naudinga tyrinėti. 
-
-```{r clustering, eval=FALSE}
-#----Elbow-------
-df <- df_numerification(.df= duomenys_grp_store, q = expr(str_extract(., "\\d+$")) )
-# function to compute total within-cluster sum of square
-# wss <- function(.df, k) {
-#   kmeans(.df, k, nstart = 10 )$tot.withinss
-# }
-# # Compute and plot wss for k = 1 to k = 15
-# k.values <- 1:9
-# # extract wss for 2-15 clusters
-# wss_values <- map_dbl(k.values, ~wss(.df = .df, k = .))
-# plot(k.values, wss_values,
-#      type="b", pch = 19, frame = FALSE,
-#      xlab="Number of clusters K",
-#      ylab="Total within-clusters SmOSq)
-fviz_nbclust(df, kmeans, method = "wss")
-#---K-MEANS ---------
-duomenys__cl <- kmeans(df, centers = 4, nstart = 25)
-fviz_cluster(object = duomenys__cl, data = df)
-
-df <- df %>% dplyr::mutate(cluster = duomenys__cl$cluster)
-
+Naudoju agreguotus duomenis `duomenys_grp_store` [duomenys grupuoti pagal brandą-produktą-parduotuvę]:
+```{r}
+duomenys_grp_store
 ```
 
-Klasterių vidurkiai: 
-
-```{r clusters means, eval=FALSE}
-duomenys__cl$centers
-```
-
-Duomenų klasteriavimo lentelė:
-
-```{r clusters table, eval=FALSE}
-DT_func(df)
-```
-Kaip matyti klasteris 4 yra mažiausios apyvartos deriniai; klasteris 1 - didžiausia apyvarta.
-
-Dinaminė aplikacija klasteriams apskaičiuoti ir pavaizduoti.
+Dinaminė aplikacija klasteriams apskaičiuoti ir pavaizduoti pagal K-Means algoritmą.
 
 ```{r clustering_app}
+df <- df_numerification(.df= duomenys_grp_store, q = expr(str_extract(., "\\d+$")) )
 app_kmeans_cluster <-  function(dataset) {
   vars = names(dataset)
   shinyApp(
@@ -293,42 +256,23 @@ app_kmeans_cluster(df)
 
 **Suminiai produktų** grafikai kiekvienam mėnesiui. Spalva nurodo brandą. 
 
-```{r vis product sum}
+```{r vis product sum, eval=T}
 df <- duomenys_eda %>% 
   dplyr::group_by(brand, product, receipt_month) %>% 
   dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
   tidyr::gather(key = measure, value = value, suma:kiekis) %>% 
   dplyr::arrange(desc(value))
 
-g <- ggplot(df, aes(x = factor(product), y = value, fill = brand)) + 
-  geom_col() + 
-  scale_fill_viridis_c() + 
-  theme(legend.position="top") + 
-  facet_grid(measure ~ receipt_month, scales = "free_y")
+g <- ggplot2::ggplot(df, aes(x = factor(product), y = value, fill = brand)) + 
+  ggplot2::geom_col() + 
+  ggplot2::scale_fill_viridis_c() + 
+  ggplot2::theme(legend.position="top") + 
+  ggplot2::facet_grid(measure ~ receipt_month, scales = "free_y")
 
-ggplotly(g)
-
-```
-
-**Statistiniai brandų** pasiskirstymai kiekvienam mėnesiui. Spalva == Brandas.
-
-```{r vis product stats, eval=F}
-df <- duomenys_eda %>% 
-  dplyr::group_by(brand,receipt_month ) %>% 
-  dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
-  tidyr::gather(key = measure, value = value, c(suma,kiekis))
-
-g <- ggplot(df, aes(x = factor(brand), y = value, colour = brand)) + 
-  geom_violin() + 
-  geom_boxplot(width=.1, outlier.colour=NA) +
-  stat_summary(fun.y="mean", geom="point", shape=23, size=3, fill="red") +
-  scale_fill_viridis_c() + 
-  theme(legend.position="top") + 
-  facet_grid(measure ~ receipt_month, scales = "free_y")
-
-ggplotly(g)
+plotly::ggplotly(g)
 
 ```
+
 
 **Suminiai parduotuvių** pardavimai kiekvienam mėnesiui.
 ```{r vis store sum, eval=T}
@@ -338,13 +282,13 @@ df <- duomenys_eda %>%
   tidyr::gather(key = measure, value = value, c(suma, kiekis)) %>% 
   dplyr::arrange(desc(value))
 
-g <- ggplot(df, aes(x = factor(store), y = value)) + 
-  geom_col(aes(fill = store)) +
-  scale_fill_viridis_c() + 
-  theme(legend.position="top") + 
-  facet_grid(measure ~ receipt_month, scales = "free_y")
+g <- ggplot2::ggplot(df, aes(x = factor(store), y = value)) + 
+  ggplot2::geom_col(aes(fill = store)) +
+  ggplot2::scale_fill_viridis_c() + 
+  ggplot2::theme(legend.position="top") + 
+  ggplot2::facet_grid(measure ~ receipt_month, scales = "free_y")
 
-ggplotly(g)
+plotly::ggplotly(g)
 
 ```
 
@@ -358,19 +302,23 @@ df <- duomenys_ %>%
   tidyr::gather(key = measure, value = value, c(suma, kiekis)) %>% 
   dplyr::arrange(desc(value))
 
-g <- ggplot(df, aes(x = receipt_date, y = value, color = product) ) + 
-  geom_line() + 
-  scale_fill_viridis_c() + 
+g <- ggplot2::ggplot(df, aes(x = receipt_date, y = value, color = product) ) + 
+  ggplot2::geom_line() + 
+  ggplot2::scale_fill_viridis_c() + 
   #theme(legend.position="top") + 
-  facet_grid(brand ~ measure, scales = "free_y")
+  ggplot2::facet_grid(brand ~ measure, scales = "free_y")
 
-ggplotly(g)
+plotly::ggplotly(g)
 
 ```
 
-## Aplikacijos
+Matyti, kad kai kurie Brand'ai ir Prekės yra paklausūs tik kai kuriais mėnesiais, pvz. `Brand_13` ir `Product_9` paklausiausias liepos mėnesį. 
 
-Aplikacija stebėti suminių kiekio ir piniginės sumos pokyčius kiekvienam mėnesiui:
+
+## Aplikacijos informacijai ir modeliavimui
+
+
+Aplikacija stebėti suminius kiekio ir sumos pokyčius kiekvienam mėnesiui, pašalinus pasirinktą produktą:
 
 ```{r app remove prod}
 app_remove_prod <-  function(dataset) {
@@ -388,7 +336,7 @@ app_remove_prod <-  function(dataset) {
         tableOutput('tabBefore')  
       ),
       fluidRow(
-         column(4, 'total stats after selected product removal over period: '),
+        column(4, 'total stats after selected product removal over period: '),
         tableOutput('tabAfter')  
       ),
       fluidRow(
@@ -409,31 +357,31 @@ app_remove_prod <-  function(dataset) {
                            arrange(desc(n_uniq_account)),
                          by ="receipt_month")
       dtAfter <- reactive({ 
-         dataset %>% 
+        dataset %>% 
           dplyr::filter(product != input$product) %>% 
-        dplyr::group_by(receipt_month) %>%
-        dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
-        dplyr::left_join(dataset %>% 
-                           dplyr::filter(product != input$product) %>% 
-                           dplyr::select(account_id, brand, product, receipt_month) %>% 
-                           dplyr::distinct() %>% 
-                           dplyr::group_by(receipt_month) %>% 
-                           dplyr::summarise(n_uniq_account = n()) %>% 
-                           arrange(desc(n_uniq_account)),
-                         by ="receipt_month")
+          dplyr::group_by(receipt_month) %>%
+          dplyr::summarise_at(vars(suma, kiekis), sum) %>% 
+          dplyr::left_join(dataset %>% 
+                             dplyr::filter(product != input$product) %>% 
+                             dplyr::select(account_id, brand, product, receipt_month) %>% 
+                             dplyr::distinct() %>% 
+                             dplyr::group_by(receipt_month) %>% 
+                             dplyr::summarise(n_uniq_account = n()) %>% 
+                             arrange(desc(n_uniq_account)),
+                           by ="receipt_month")
       })
       
       output$tabBefore  <- renderTable({
-          dtBefore
-        })
+        dtBefore
+      })
       
       output$tabAfter  <- renderTable({
-          dtAfter()
-        })
+        dtAfter()
+      })
       
       output$tabDiff  <- renderTable({
-          dtAfter() - dtBefore
-        })
+        dtAfter() - dtBefore
+      })
     },
     options = list(height = 500)
   )
@@ -443,11 +391,107 @@ app_remove_prod(duomenys_eda)
 
 ```
 
-Aplikacijos prototipas prognozuoti bendros € sumos pokyčius į ateitį kiekvienam Produktui, remiantis duotais *raw* duomenimis:
 
-```{r app ts predict}
-library(prophet)
-app_ts_predict <-  function(dataset) {
+Aplikacijos prototipas skaičiuoti pasirinkto produkto autokoreliacijos funkciją, ją atvaizduoti.
+
+ACF yra naudinga nustatant nestacionarias laiko sekas. Stacionariosioms laiko sekoms ACF santykinai greitai mažėja į 0, o nestacionarių duomenų ACF mažėja lėtai. Be to, ne stacionariems duomenims autokoreliacijos parametras r1 [matas nustatyti ryšiui tarp y(t) ir y(t-1) ] dažnai yra didelis ir teigiamas.
+
+
+Pasitelkiant ACF, toliau galima prognozuoti bendro kiekio pokyčius į ateitį pagal 4 skirtingus algoritmus:
+
++ Vidurkinimo metodu - visų būsimų verčių prognozės yra lygios istorinių duomenų vidurkiui;
+
++ 'Naïve' metodas - visos prognozės yra paskutinių k stebėjimo vertės;
+
++ Sezoninis 'Naïve' metodas - kiekviena prognozė yra lygi paskutinei stebėtai vertei iš to paties sezono (pvz., tą patį praėjusių metų mėnesį ar praėjusias savaites);
+
++ ETS - eksponentinio 'išlyginimo' prognozavimo metodas -  prognozė yra ankstesnių stebėjimų svertinė suma, modelis naudoja eksponentiškai mažėjantį svorį ankstesniems stebėjimams;
+
++ ARIMA;
+
+Aplikacija remiasi duotais *raw* duomenimis:
+
+
+```{r}
+data.table(duomenys_)
+```
+
+**Aplikacija**
+
+```{r time_series_model_app}
+app_ts_predict_fable <-  function(dataset) {
+  vars <- dataset$product %>% unique() %>% sort()
+  
+  shinyApp(
+    ui <- fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+               column(4, selectInput('product', 'Product to be predicted: ', vars, selected = vars[1])),
+               column(4, numericInput('predDays', 'Days to be predicted: ', 7, min = 1, max = 365))
+      ),
+      fluidRow(
+        column(4, "Autocorrelation plot"),
+        plotOutput('acfPlot', height = "400px")  
+      ),
+      fluidRow(
+        column(4, "Prediction plot"),
+        plotOutput('predPlot', height = "400px")  
+      )
+    ),
+    
+    server <- function(input, output, session) {
+      re_df <- reactive({ dataset %>% 
+          dplyr::group_by(receipt_date, product) %>% 
+          dplyr::summarise_at(vars(kiekis, suma), sum) %>%
+          dplyr::ungroup() %>% 
+          dplyr::filter(product == input$product) %>%
+          tsibble::as_tsibble(key = product,
+                              index = receipt_date,
+                              regular = T) %>% 
+          fill_gaps(precip = 0) 
+      })
+      
+      output$acfPlot  <- renderPlot({
+        df <- re_df()
+        stats::acf(df$kiekis) %>% autoplot()
+      })
+      output$predPlot  <- renderPlot({
+        #---  model  ---
+        df <- re_df()
+        df_model <- df %>% 
+          filter(!is.na(kiekis)) %>% 
+          model(
+            Mean = MEAN(kiekis),
+            naive = NAIVE(kiekis),
+            snaive = SNAIVE(kiekis),
+            ets = ETS(kiekis),
+            arima = ARIMA(kiekis),
+          )
+        
+        df_forecast <- df_model %>% 
+          forecast(h = str_c(as.numeric(input$predDays), " days"))
+        
+        df_forecast %>%
+          autoplot(df, level = NULL) +
+          ggtitle(str_c("Forecasts of ", input$product )) +
+          xlab("date") + ylab("kiekis") +
+          guides(colour=guide_legend(title="Forecast:"))+
+          theme(legend.position = "top")
+        
+      })
+    },
+    
+    options = list(height = 500)
+  )
+}
+
+app_ts_predict_fable(duomenys_)
+
+```
+
+Aplikacijos prototipas prognozuoti bendro kiekio pokyčius į ateitį pasirinktam Produktui, pagal Facebook Prophet API :
+
+```{r app ts predict prophet}
+app_ts_predict_2 <-  function(dataset) {
   
   vars <- dataset$product %>% unique() %>% sort()
   
@@ -472,12 +516,12 @@ app_ts_predict <-  function(dataset) {
           dplyr::ungroup() %>% 
           dplyr::select(-product) %>% 
           setNames(c("ds", "y")) %>% 
-          prophet(., growth = "linear", yearly.seasonality=T)
+          prophet(., growth = "linear", yearly.seasonality=T,daily.seasonality=T, weekly.seasonality = T)
         
         future <-prophet::make_future_dataframe(m, periods = as.numeric(input$predDays))
         
         forecast <- predict(m, future) 
-        plot(m, forecast, main = "product prediction in linear method")
+        prophet_plot_components(m, forecast)
       })
     },
     
@@ -485,7 +529,7 @@ app_ts_predict <-  function(dataset) {
   )
 }
 
-app_ts_predict(duomenys_)
+app_ts_predict_2(duomenys_)
 
 ```
 
